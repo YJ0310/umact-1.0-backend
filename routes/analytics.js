@@ -8,6 +8,16 @@ import { getDB } from '../db/connection.js'
 
 const router = Router()
 
+function medianInt(values) {
+  if (!values?.length) return 1
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  if (sorted.length % 2 === 0) {
+    return Math.floor((sorted[mid - 1] + sorted[mid]) / 2)
+  }
+  return Math.floor(sorted[mid])
+}
+
 // ═════════════════════════════════════════════════════════════
 // GET /api/analytics/insurer — Insurer dashboard aggregations
 // ═════════════════════════════════════════════════════════════
@@ -102,10 +112,56 @@ router.get('/hospitals', async (req, res) => {
     // Get hospital tier assignments
     const hospitals = await db.collection('hospitals').find({}).toArray()
 
+    // Compute annual quota using median annual claim count per hospital_type + DRG.
+    const annualHospitalDRG = await db.collection('claims').aggregate([
+      {
+        $addFields: {
+          parsedAdmissionDate: {
+            $convert: {
+              input: '$admission_date',
+              to: 'date',
+              onError: null,
+              onNull: null
+            }
+          }
+        }
+      },
+      { $match: { parsedAdmissionDate: { $ne: null } } },
+      {
+        $addFields: {
+          admissionYear: { $year: '$parsedAdmissionDate' }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            hospital: '$hospital_name',
+            hospitalType: '$hospital_type',
+            drg: '$sub_category',
+            year: '$admissionYear'
+          },
+          claimCount: { $sum: 1 }
+        }
+      }
+    ]).toArray()
+
+    const quotaByTypeDRG = new Map()
+    const annualCountsByTypeDRG = new Map()
+    annualHospitalDRG.forEach((row) => {
+      const key = `${row._id.hospitalType}::${row._id.drg}`
+      if (!annualCountsByTypeDRG.has(key)) {
+        annualCountsByTypeDRG.set(key, [])
+      }
+      annualCountsByTypeDRG.get(key).push(row.claimCount)
+    })
+    annualCountsByTypeDRG.forEach((counts, key) => {
+      quotaByTypeDRG.set(key, Math.max(1, medianInt(counts)))
+    })
+
     // Aggregate claims by hospital × sub_category (DRG proxy)
     const hospitalDRG = await db.collection('claims').aggregate([
       { $group: {
-        _id: { hospital: '$hospital_name', drg: '$sub_category' },
+        _id: { hospital: '$hospital_name', drg: '$sub_category', hospitalType: '$hospital_type' },
         avgClaim: { $avg: '$total_claim_amount' },
         totalClaim: { $sum: '$total_claim_amount' },
         avgLOS: { $avg: '$length_of_stay' },
@@ -113,6 +169,14 @@ router.get('/hospitals', async (req, res) => {
       }},
       { $sort: { '_id.hospital': 1, avgClaim: -1 } }
     ]).toArray()
+
+    const hospitalDRGWithQuota = hospitalDRG.map((row) => {
+      const key = `${row._id.hospitalType}::${row._id.drg}`
+      return {
+        ...row,
+        quota: quotaByTypeDRG.get(key) || 1
+      }
+    })
 
     // Aggregate claims by hospital for O/E calc
     const hospitalStats = await db.collection('claims').aggregate([
@@ -130,7 +194,7 @@ router.get('/hospitals', async (req, res) => {
       success: true,
       data: {
         hospitals,
-        hospitalDRG,
+        hospitalDRG: hospitalDRGWithQuota,
         hospitalStats,
         lastUpdated: new Date()
       }
