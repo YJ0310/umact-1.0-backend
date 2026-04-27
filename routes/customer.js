@@ -9,6 +9,9 @@ import { ObjectId } from 'mongodb'
 
 const router = Router()
 
+const PLAN_BASE_PREMIUMS = { Basic: 2400, Silver: 4800, Gold: 7800, Platinum: 14400 }
+const PLAN_LIMITS = { Basic: 50000, Silver: 80000, Gold: 100000, Platinum: 150000 }
+
 // ── File upload config (medical checkup & claim receipts) ──
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -20,29 +23,111 @@ const upload = multer({
   }
 })
 
-// ── Premium calculation (mirrors frontend logic) ────────────
-function calculatePremium(data) {
-  const basePremiums = { Basic: 2400, Silver: 4800, Gold: 7800, Platinum: 14400 }
-  let premium = basePremiums[data.planType] || 4800
+// ── Risk-scoring premium model (aligned with notebook logic) ─
+function toRiskBand(score) {
+  if (score < 30) return 'Low'
+  if (score < 55) return 'Moderate'
+  if (score < 75) return 'High'
+  return 'Very High'
+}
 
-  const age = data.age || 30
-  const ageScore = Math.min(age / 84, 1)
-  premium *= (1 + ageScore * 0.75)
+function buildRiskScoring({ age, avgBmi, smoker, conditionCount, region }) {
+  const agePoints = Math.min(Math.max(((age - 18) / 60) * 28, 0), 28)
+  let bmiPoints = 0
+  if (avgBmi < 18.5) bmiPoints = 6
+  else if (avgBmi < 25) bmiPoints = 0
+  else if (avgBmi < 30) bmiPoints = 8
+  else if (avgBmi < 35) bmiPoints = 15
+  else if (avgBmi < 40) bmiPoints = 23
+  else bmiPoints = 30
 
+  const smokerPoints = smoker ? 18 : 0
+  const conditionPoints = Math.min((conditionCount || 0) * 7, 28)
+  const regionPointsMap = { Central: 8, Southern: 4, Northern: 3, Eastern: 5, 'East Malaysia': 2 }
+  const regionPoints = regionPointsMap[region] || 4
+
+  const rawScore = agePoints + bmiPoints + smokerPoints + conditionPoints + regionPoints
+  const riskScore = Math.round(Math.min((rawScore / 112) * 100, 100))
+
+  return {
+    riskScore,
+    riskBand: toRiskBand(riskScore),
+    components: {
+      agePoints: Math.round(agePoints * 10) / 10,
+      bmiPoints,
+      smokerPoints,
+      conditionPoints,
+      regionPoints
+    }
+  }
+}
+
+function calculatePremiumWithModel(data) {
+  const baseAnnual = PLAN_BASE_PREMIUMS[data.planType] || PLAN_BASE_PREMIUMS.Silver
+
+  const ageMultiplier = 1 + Math.min((data.age || 30) / 84, 1) * 0.75
+  let bmiMultiplier = 1
   const avgBmi = data.avgBmi || 24
-  if (avgBmi >= 30 && avgBmi < 40) premium *= 1.12
-  else if (avgBmi >= 40) premium *= 1.28
-
-  if (data.smoker) premium *= 1.18
-
-  const condCount = data.conditionCount || 0
-  premium *= (1 + condCount * 0.10)
-
+  if (avgBmi >= 30 && avgBmi < 40) bmiMultiplier = 1.12
+  else if (avgBmi >= 40) bmiMultiplier = 1.28
+  const smokerMultiplier = data.smoker ? 1.18 : 1
+  const conditionMultiplier = 1 + Math.max(data.conditionCount || 0, 0) * 0.10
   const regionFactors = { Central: 1.12, Southern: 1.0, Northern: 0.96, Eastern: 0.92, 'East Malaysia': 0.88 }
-  premium *= regionFactors[data.region] || 1.0
+  const regionMultiplier = regionFactors[data.region] || 1.0
 
-  const annual = Math.round(premium)
-  return { monthly: Math.round(annual / 12), annual }
+  const factorSteps = [
+    { key: 'age', label: 'Age profile', multiplier: ageMultiplier },
+    { key: 'bmi', label: 'BMI profile', multiplier: bmiMultiplier },
+    { key: 'smoker', label: 'Smoking status', multiplier: smokerMultiplier },
+    { key: 'conditions', label: 'Health conditions', multiplier: conditionMultiplier },
+    { key: 'region', label: `Regional adjustment (${data.region || 'Unknown'})`, multiplier: regionMultiplier }
+  ]
+
+  let rolling = baseAnnual
+  const reasons = []
+  factorSteps.forEach((step) => {
+    const next = rolling * step.multiplier
+    const impact = next - rolling
+    if (Math.abs(impact) >= 1) {
+      reasons.push({
+        key: step.key,
+        label: step.label,
+        multiplier: Math.round(step.multiplier * 1000) / 1000,
+        impactAnnual: Math.round(impact),
+        direction: impact >= 0 ? 'up' : 'down'
+      })
+    }
+    rolling = next
+  })
+
+  const annual = Math.round(rolling)
+  const risk = buildRiskScoring(data)
+
+  return {
+    monthly: Math.round(annual / 12),
+    annual,
+    model: {
+      riskScore: risk.riskScore,
+      riskBand: risk.riskBand,
+      components: risk.components,
+      reasons,
+      baseAnnual
+    }
+  }
+}
+
+function buildPlanEstimates(profile) {
+  return Object.keys(PLAN_BASE_PREMIUMS).map((plan) => {
+    const premium = calculatePremiumWithModel({ ...profile, planType: plan })
+    const lower = Math.round(premium.monthly * 0.9)
+    const upper = Math.round(premium.monthly * 1.1)
+    return {
+      name: plan,
+      monthly: premium.monthly,
+      annual: premium.annual,
+      monthlyRange: { min: lower, max: upper }
+    }
+  })
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -64,34 +149,150 @@ router.post('/quote', async (req, res) => {
       ? (weightRange.min + weightRange.max) / 2 / ((((heightRange.min + heightRange.max) / 2) / 100) ** 2)
       : 24
 
+    const firebaseUid = req.body.firebaseUid || null
+    const previewOnly = Boolean(req.body.previewOnly)
     const condCount = conditions ? conditions.filter(c => c !== 'none').length : 0
-    const premiums = calculatePremium({ age, avgBmi, smoker: smoker === 'Yes', conditionCount: condCount, region, planType })
-
-    // Store quote in DB
-    const db = getDB()
-    const quoteDoc = {
-      firebaseUid: req.body.firebaseUid || null,
-      dob: dob.toISOString(),
-      age, gender,
-      heightRange, weightRange, avgBmi: Math.round(avgBmi * 10) / 10,
-      smoker, conditions, conditionCount: condCount,
-      state, region, planType,
-      premiums,
-      verified: false,
-      source: 'app',
-      created_at: new Date()
+    const profile = {
+      age,
+      avgBmi,
+      smoker: smoker === 'Yes',
+      conditionCount: condCount,
+      region,
+      planType
     }
-    const result = await db.collection('quotes').insertOne(quoteDoc)
+    const premiumResult = calculatePremiumWithModel(profile)
+    const planEstimates = buildPlanEstimates({ ...profile, planType: undefined })
+
+    const db = getDB()
+    let hasExistingAccount = false
+    if (firebaseUid) {
+      hasExistingAccount = Boolean(await db.collection('users').findOne({ firebase_uid: firebaseUid }))
+    }
+
+    const shouldPersist = !previewOnly && !hasExistingAccount
+    let insertedId = null
+
+    if (shouldPersist) {
+      const quoteDoc = {
+        firebaseUid,
+        dob: dob.toISOString(),
+        age,
+        gender,
+        heightRange,
+        weightRange,
+        avgBmi: Math.round(avgBmi * 10) / 10,
+        smoker,
+        conditions,
+        conditionCount: condCount,
+        state,
+        region,
+        planType,
+        premiums: { monthly: premiumResult.monthly, annual: premiumResult.annual },
+        pricingModel: premiumResult.model,
+        verified: false,
+        source: 'app',
+        created_at: new Date()
+      }
+      const result = await db.collection('quotes').insertOne(quoteDoc)
+      insertedId = result.insertedId
+    }
 
     res.json({
       success: true,
-      quoteId: result.insertedId,
-      premiums,
+      quoteId: insertedId,
+      quoteStored: Boolean(insertedId),
+      premiums: { monthly: premiumResult.monthly, annual: premiumResult.annual },
+      model: premiumResult.model,
+      planEstimates,
+      accountMode: hasExistingAccount ? 'existing-account-preview' : 'new-registration-eligible',
+      message: hasExistingAccount
+        ? 'Existing account detected. This quote is preview only and was not saved.'
+        : 'Quote calculated successfully.',
       age,
       avgBmi: Math.round(avgBmi * 10) / 10
     })
   } catch (err) {
     console.error('Quote error:', err)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// ═════════════════════════════════════════════════════════════
+// POST /api/customer/register-session — Register account from quote context
+// ═════════════════════════════════════════════════════════════
+router.post('/register-session', async (req, res) => {
+  try {
+    const { sub: uid, email, name, given_name, picture, quoteId } = req.body
+    if (!uid) return res.status(400).json({ success: false, error: 'Missing UID' })
+    if (!quoteId) {
+      return res.status(400).json({ success: false, code: 'NO_QUOTE_CONTEXT', error: 'Quote is required for first-time registration.' })
+    }
+
+    const db = getDB()
+    const existingUser = await db.collection('users').findOne({ firebase_uid: uid })
+    if (existingUser) {
+      await db.collection('users').updateOne(
+        { firebase_uid: uid },
+        { $set: { email, name, given_name, picture, last_login: new Date() } }
+      )
+      return res.json({ success: true, alreadyRegistered: true })
+    }
+
+    let quoteObjectId
+    try {
+      quoteObjectId = new ObjectId(quoteId)
+    } catch {
+      return res.status(400).json({ success: false, code: 'INVALID_QUOTE_ID', error: 'Invalid quote reference.' })
+    }
+
+    const quote = await db.collection('quotes').findOne({ _id: quoteObjectId })
+    if (!quote) {
+      return res.status(404).json({ success: false, code: 'QUOTE_NOT_FOUND', error: 'Quote not found. Please recalculate your quote.' })
+    }
+
+    const planType = quote.planType || 'Basic'
+    const annualLimit = PLAN_LIMITS[planType] || PLAN_LIMITS.Basic
+
+    const userDoc = {
+      firebase_uid: uid,
+      email,
+      name,
+      given_name,
+      picture,
+      planType,
+      annualLimit,
+      onboarding: {
+        source: 'quote-session',
+        quoteId: quote._id,
+        completed_at: new Date()
+      },
+      profileSnapshot: {
+        age: quote.age,
+        avgBmi: quote.avgBmi,
+        smoker: quote.smoker,
+        conditionCount: quote.conditionCount,
+        state: quote.state,
+        region: quote.region
+      },
+      created_at: new Date(),
+      source: 'app'
+    }
+
+    await db.collection('users').insertOne(userDoc)
+    await db.collection('quotes').updateOne(
+      { _id: quote._id },
+      {
+        $set: {
+          firebaseUid: uid,
+          used_for_registration: true,
+          registered_at: new Date()
+        }
+      }
+    )
+
+    res.json({ success: true, alreadyRegistered: false, planType, annualLimit })
+  } catch (err) {
+    console.error('Register session error:', err)
     res.status(500).json({ success: false, error: err.message })
   }
 })
@@ -215,18 +416,15 @@ router.post('/login', async (req, res) => {
     if (!uid) return res.status(400).json({ success: false, error: 'Missing UID' })
     const db = getDB()
 
-    // Get or Create user profile
+    // Only allow login for users who completed quote-based registration.
     let user = await db.collection('users').findOne({ firebase_uid: uid })
     if (!user) {
-      user = {
-        firebase_uid: uid,
-        email, name, given_name, picture,
-        planType: 'Basic', // Default to Basic until Insurer approves a quote
-        annualLimit: 50000,
-        created_at: new Date(),
-        source: 'app'
-      }
-      await db.collection('users').insertOne(user)
+      return res.status(404).json({
+        success: false,
+        code: 'NO_PROFILE',
+        requiresQuote: true,
+        error: 'No customer profile found. Please complete quote onboarding first.'
+      })
     } else {
       // Update with latest Google info
       await db.collection('users').updateOne(
@@ -252,7 +450,7 @@ router.post('/login', async (req, res) => {
       { $group: { _id: null, total: { $sum: '$claimAmount' } } }
     ]).toArray()
     const totalUsed = approvedClaims[0]?.total || 0
-    const annualLimit = user.annualLimit || 50000
+    const annualLimit = user.annualLimit || PLAN_LIMITS.Basic
 
     // Get checkup status
     const latestCheckup = await db.collection('checkups')
@@ -268,6 +466,7 @@ router.post('/login', async (req, res) => {
         totalUsed,
         remaining: annualLimit - totalUsed,
         copaymentCap: 3000,
+        onboardingStatus: user.onboarding?.source ? 'completed' : 'missing',
       },
       claims,
       checkup: latestCheckup ? {
