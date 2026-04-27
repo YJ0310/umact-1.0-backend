@@ -8,14 +8,10 @@ import { getDB } from '../db/connection.js'
 
 const router = Router()
 
-function medianInt(values) {
-  if (!values?.length) return 1
-  const sorted = [...values].sort((a, b) => a - b)
-  const mid = Math.floor(sorted.length / 2)
-  if (sorted.length % 2 === 0) {
-    return Math.floor((sorted[mid - 1] + sorted[mid]) / 2)
-  }
-  return Math.floor(sorted[mid])
+function meanInt(values) {
+  if (!values?.length) return 0
+  const sum = values.reduce((acc, v) => acc + v, 0)
+  return Math.max(1, Math.round(sum / values.length))
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -108,12 +104,13 @@ router.get('/insurer', async (req, res) => {
 router.get('/hospitals', async (req, res) => {
   try {
     const db = getDB()
+    const claims = db.collection('claims')
 
     // Get hospital tier assignments
     const hospitals = await db.collection('hospitals').find({}).toArray()
 
-    // Compute annual quota using median annual claim count per hospital_type + DRG.
-    const annualHospitalDRG = await db.collection('claims').aggregate([
+    // Build annual hospital x DRG stats to support year-based policy.
+    const annualHospitalDRG = await claims.aggregate([
       {
         $addFields: {
           parsedAdmissionDate: {
@@ -136,50 +133,80 @@ router.get('/hospitals', async (req, res) => {
         $group: {
           _id: {
             hospital: '$hospital_name',
-            hospitalType: '$hospital_type',
             drg: '$sub_category',
             year: '$admissionYear'
           },
+          avgClaim: { $avg: '$total_claim_amount' },
+          totalClaim: { $sum: '$total_claim_amount' },
+          avgLOS: { $avg: '$length_of_stay' },
           claimCount: { $sum: 1 }
         }
       }
     ]).toArray()
 
-    const quotaByTypeDRG = new Map()
-    const annualCountsByTypeDRG = new Map()
-    annualHospitalDRG.forEach((row) => {
-      const key = `${row._id.hospitalType}::${row._id.drg}`
-      if (!annualCountsByTypeDRG.has(key)) {
-        annualCountsByTypeDRG.set(key, [])
-      }
-      annualCountsByTypeDRG.get(key).push(row.claimCount)
-    })
-    annualCountsByTypeDRG.forEach((counts, key) => {
-      quotaByTypeDRG.set(key, Math.max(1, medianInt(counts)))
-    })
+    const years = [...new Set(annualHospitalDRG.map((row) => row._id.year))].sort((a, b) => a - b)
+    const policyYear = years.at(-1) || null
+    const referenceYear = years.length > 1 ? years.at(-2) : null
 
-    // Aggregate claims by hospital × sub_category (DRG proxy)
-    const hospitalDRG = await db.collection('claims').aggregate([
-      { $group: {
-        _id: { hospital: '$hospital_name', drg: '$sub_category', hospitalType: '$hospital_type' },
-        avgClaim: { $avg: '$total_claim_amount' },
-        totalClaim: { $sum: '$total_claim_amount' },
-        avgLOS: { $avg: '$length_of_stay' },
-        count: { $sum: 1 }
-      }},
-      { $sort: { '_id.hospital': 1, avgClaim: -1 } }
-    ]).toArray()
+    const quotaByDRG = new Map()
+    if (referenceYear !== null) {
+      const countsByDRG = new Map()
+      annualHospitalDRG
+        .filter((row) => row._id.year === referenceYear)
+        .forEach((row) => {
+          const drg = row._id.drg
+          if (!countsByDRG.has(drg)) {
+            countsByDRG.set(drg, [])
+          }
+          countsByDRG.get(drg).push(row.claimCount)
+        })
 
-    const hospitalDRGWithQuota = hospitalDRG.map((row) => {
-      const key = `${row._id.hospitalType}::${row._id.drg}`
+      countsByDRG.forEach((counts, drg) => {
+        quotaByDRG.set(drg, meanInt(counts))
+      })
+    }
+
+    const currentYearRows = policyYear === null
+      ? []
+      : annualHospitalDRG.filter((row) => row._id.year === policyYear)
+
+    const hospitalDRGWithQuota = currentYearRows.map((row) => {
+      const drg = row._id.drg
+      const enforceQuota = referenceYear !== null && quotaByDRG.has(drg)
       return {
-        ...row,
-        quota: quotaByTypeDRG.get(key) || 1
+        _id: { hospital: row._id.hospital, drg },
+        avgClaim: row.avgClaim,
+        totalClaim: row.totalClaim,
+        avgLOS: row.avgLOS,
+        count: row.claimCount,
+        quota: enforceQuota ? quotaByDRG.get(drg) : 0,
+        enforceQuota,
+        policyYear,
+        referenceYear
       }
     })
 
-    // Aggregate claims by hospital for O/E calc
-    const hospitalStats = await db.collection('claims').aggregate([
+    // Aggregate current policy-year claims by hospital for O/E calc.
+    const hospitalStats = await claims.aggregate([
+      {
+        $addFields: {
+          parsedAdmissionDate: {
+            $convert: {
+              input: '$admission_date',
+              to: 'date',
+              onError: null,
+              onNull: null
+            }
+          }
+        }
+      },
+      { $match: { parsedAdmissionDate: { $ne: null } } },
+      {
+        $addFields: {
+          admissionYear: { $year: '$parsedAdmissionDate' }
+        }
+      },
+      { $match: { admissionYear: policyYear } },
       { $group: {
         _id: '$hospital_name',
         avgClaim: { $avg: '$total_claim_amount' },
@@ -196,6 +223,13 @@ router.get('/hospitals', async (req, res) => {
         hospitals,
         hospitalDRG: hospitalDRGWithQuota,
         hospitalStats,
+        quotaPolicy: {
+          pool: 'single-drg-per-year',
+          metric: 'mean',
+          policyYear,
+          referenceYear,
+          firstYearObserveOnly: true
+        },
         lastUpdated: new Date()
       }
     })
