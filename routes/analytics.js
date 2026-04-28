@@ -398,6 +398,53 @@ router.get('/hospitals', async (req, res) => {
       { $sort: { avgClaim: -1 } }
     ]).toArray()
 
+    // ─── Box Plot Statistics ───
+    const boxPlotStats = await claims.aggregate([
+      {
+        $addFields: {
+          admissionYear: { $year: { $convert: { input: '$admission_date', to: 'date', onError: new Date('2023-01-01') } } },
+          drgKey: { $concat: ['$major_category', ' | ', '$sub_category', ' | ', '$procedure_diagnosis'] }
+        }
+      },
+      { $match: { drgKey: { $in: FIXED_DRG_LIST } } },
+      {
+        $lookup: {
+          from: 'hospitals',
+          localField: 'hospital_name',
+          foreignField: 'hospital_name',
+          as: 'hospitalInfo'
+        }
+      },
+      {
+        $addFields: {
+          tier: { $ifNull: [{ $arrayElemAt: ['$hospitalInfo.tier', 0] }, 2] }
+        }
+      },
+      {
+        $group: {
+          _id: { year: '$admissionYear', drg: '$drgKey', tier: '$tier' },
+          amounts: { $push: '$total_claim_amount' }
+        }
+      }
+    ]).toArray()
+
+    const formattedBoxPlot = boxPlotStats.map(stat => {
+      const sorted = stat.amounts.sort((a, b) => a - b)
+      const q1 = sorted[Math.floor(sorted.length * 0.25)] || 0
+      const median = sorted[Math.floor(sorted.length * 0.5)] || 0
+      const q3 = sorted[Math.floor(sorted.length * 0.75)] || 0
+      const iqr = q3 - q1
+      const min = Math.max(sorted[0], q1 - 1.5 * iqr)
+      const max = Math.min(sorted[sorted.length - 1], q3 + 1.5 * iqr)
+      const outliers = sorted.filter(v => v < min || v > max)
+      
+      return {
+        _id: stat._id,
+        min, q1, median, q3, max, outliers,
+        sampleSize: sorted.length
+      }
+    })
+
     res.json({
       success: true,
       data: {
@@ -406,6 +453,7 @@ router.get('/hospitals', async (req, res) => {
         yearlyPoolDetails: filteredYearlyPoolDetails,
         hospitalStats,
         drgCatalog: FIXED_DRG_LIST,
+        boxPlotStats: formattedBoxPlot,
         quotaPolicy: {
           mode: 'money-pool-per-drg-per-hospital-year',
           metric: 'amount',
