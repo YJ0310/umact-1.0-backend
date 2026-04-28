@@ -22,11 +22,21 @@ const FIXED_DRG_POOL_BY_YEAR = {
 }
 
 const FIXED_DRG_LIST = [
-  'Maternity',
-  'Cardiac',
-  'Orthopedic',
-  'Respiratory',
-  'Infectious'
+  'Medical | Infectious | Dengue Fever',
+  'Medical | Infectious | Dengue Haemorrhagic Fever',
+  'Medical | Respiratory | Asthma Exacerbation',
+  'Medical | Respiratory | Bronchitis',
+  'Medical | Respiratory | COPD Exacerbation',
+  'Medical | Respiratory | Pneumonia',
+  'Obstetrics | Maternity | C-Section',
+  'Obstetrics | Maternity | Normal Delivery',
+  'Surgical | Cardiac | Angioplasty with Stent',
+  'Surgical | Cardiac | CABG',
+  'Surgical | Cardiac | Heart Valve Replacement',
+  'Surgical | Orthopedic | Arthroscopy',
+  'Surgical | Orthopedic | Hip Replacement',
+  'Surgical | Orthopedic | Knee Replacement',
+  'Surgical | Orthopedic | Spinal Surgery'
 ]
 
 function roundRM(value) {
@@ -244,10 +254,10 @@ router.get('/hospitals', async (req, res) => {
                 $and: [
                   { $gt: [{ $strLenCP: { $ifNull: ['$major_category', ''] } }, 0] },
                   { $gt: [{ $strLenCP: { $ifNull: ['$sub_category', ''] } }, 0] },
-                  { $gt: [{ $strLenCP: { $ifNull: ['$diagnosis', ''] } }, 0] }
+                  { $gt: [{ $strLenCP: { $ifNull: ['$procedure_diagnosis', ''] } }, 0] }
                 ]
               },
-              { $concat: ['$major_category', ' | ', '$sub_category', ' | ', '$diagnosis'] },
+              { $concat: ['$major_category', ' | ', '$sub_category', ' | ', '$procedure_diagnosis'] },
               { $ifNull: ['$sub_category', 'Unknown DRG'] }
             ]
           }
