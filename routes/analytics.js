@@ -14,6 +14,61 @@ function meanInt(values) {
   return Math.max(1, Math.round(sum / values.length))
 }
 
+const FIXED_DRG_POOL_BY_YEAR = {
+  2023: {
+    'Surgical | Orthopedic | Arthroscopy': 10_000_000
+  }
+}
+
+function roundRM(value) {
+  return Math.round(Number(value) || 0)
+}
+
+function evaluateMoneyPool(claimRequestAmount, poolAmount, enforceQuota) {
+  const claimAmount = Number(claimRequestAmount) || 0
+  const pool = Number(poolAmount) || 0
+
+  if (!enforceQuota || pool <= 0) {
+    return {
+      reimbursedAmount: claimAmount,
+      penaltyAmount: 0,
+      usagePct: null,
+      statusZone: 'Observe',
+      reimburseRate: 1
+    }
+  }
+
+  const normalLimit = pool
+  const bufferLimit = pool * 1.2
+  const reducedLimit = pool * 1.5
+
+  let reimbursedAmount = claimAmount
+  let statusZone = 'Normal'
+
+  if (claimAmount <= normalLimit) {
+    statusZone = 'Normal'
+    reimbursedAmount = claimAmount
+  } else if (claimAmount <= bufferLimit) {
+    statusZone = 'Buffer'
+    reimbursedAmount = claimAmount
+  } else if (claimAmount <= reducedLimit) {
+    statusZone = 'Reduced'
+    reimbursedAmount = bufferLimit + (claimAmount - bufferLimit) * 0.8
+  } else {
+    statusZone = 'Penalty'
+    reimbursedAmount = bufferLimit + (reducedLimit - bufferLimit) * 0.8 + (claimAmount - reducedLimit) * 0.6
+  }
+
+  const penaltyAmount = Math.max(0, claimAmount - reimbursedAmount)
+  return {
+    reimbursedAmount,
+    penaltyAmount,
+    usagePct: (claimAmount / pool) * 100,
+    statusZone,
+    reimburseRate: claimAmount > 0 ? reimbursedAmount / claimAmount : 1
+  }
+}
+
 // ═════════════════════════════════════════════════════════════
 // GET /api/analytics/insurer — Insurer dashboard aggregations
 // ═════════════════════════════════════════════════════════════
@@ -109,7 +164,7 @@ router.get('/hospitals', async (req, res) => {
     // Get hospital tier assignments
     const hospitals = await db.collection('hospitals').find({}).toArray()
 
-    // Build annual hospital x DRG stats to support year-based policy.
+    // Build annual hospital x DRG stats to support year-based money-pool policy.
     const annualHospitalDRG = await claims.aggregate([
       {
         $addFields: {
@@ -126,14 +181,27 @@ router.get('/hospitals', async (req, res) => {
       { $match: { parsedAdmissionDate: { $ne: null } } },
       {
         $addFields: {
-          admissionYear: { $year: '$parsedAdmissionDate' }
+          admissionYear: { $year: '$parsedAdmissionDate' },
+          drgKey: {
+            $cond: [
+              {
+                $and: [
+                  { $gt: [{ $strLenCP: { $ifNull: ['$major_category', ''] } }, 0] },
+                  { $gt: [{ $strLenCP: { $ifNull: ['$sub_category', ''] } }, 0] },
+                  { $gt: [{ $strLenCP: { $ifNull: ['$diagnosis', ''] } }, 0] }
+                ]
+              },
+              { $concat: ['$major_category', ' | ', '$sub_category', ' | ', '$diagnosis'] },
+              { $ifNull: ['$sub_category', 'Unknown DRG'] }
+            ]
+          }
         }
       },
       {
         $group: {
           _id: {
             hospital: '$hospital_name',
-            drg: '$sub_category',
+            drg: '$drgKey',
             year: '$admissionYear'
           },
           avgClaim: { $avg: '$total_claim_amount' },
@@ -148,43 +216,83 @@ router.get('/hospitals', async (req, res) => {
     const policyYear = years.at(-1) || null
     const referenceYear = years.length > 1 ? years.at(-2) : null
 
-    const quotaByDRG = new Map()
-    if (referenceYear !== null) {
-      const countsByDRG = new Map()
-      annualHospitalDRG
-        .filter((row) => row._id.year === referenceYear)
-        .forEach((row) => {
-          const drg = row._id.drg
-          if (!countsByDRG.has(drg)) {
-            countsByDRG.set(drg, [])
-          }
-          countsByDRG.get(drg).push(row.claimCount)
-        })
-
-      countsByDRG.forEach((counts, drg) => {
-        quotaByDRG.set(drg, meanInt(counts))
-      })
+    const prevYearByPolicyYear = new Map()
+    for (let i = 1; i < years.length; i += 1) {
+      prevYearByPolicyYear.set(years[i], years[i - 1])
     }
+
+    // Derived pool amount: previous year's mean claim amount per DRG across hospitals.
+    const derivedPoolByPolicyYear = new Map()
+    for (let i = 1; i < years.length; i += 1) {
+      const targetYear = years[i]
+      const priorYear = years[i - 1]
+      const priorRows = annualHospitalDRG.filter((row) => row._id.year === priorYear)
+      const amountByDrg = new Map()
+
+      priorRows.forEach((row) => {
+        const drg = row._id.drg
+        if (!amountByDrg.has(drg)) {
+          amountByDrg.set(drg, [])
+        }
+        amountByDrg.get(drg).push(row.totalClaim)
+      })
+
+      const drgPoolMap = new Map()
+      amountByDrg.forEach((amounts, drg) => {
+        if (!amounts.length) return
+        const meanAmount = amounts.reduce((acc, v) => acc + v, 0) / amounts.length
+        drgPoolMap.set(drg, roundRM(meanAmount))
+      })
+
+      derivedPoolByPolicyYear.set(targetYear, drgPoolMap)
+    }
+
+    const yearlyPoolDetails = annualHospitalDRG.map((row) => {
+      const year = row._id.year
+      const drg = row._id.drg
+      const fixedPool = FIXED_DRG_POOL_BY_YEAR?.[year]?.[drg]
+      const derivedPool = derivedPoolByPolicyYear.get(year)?.get(drg) || 0
+      const poolAmount = Number.isFinite(fixedPool) ? fixedPool : derivedPool
+      const enforceQuota = Number.isFinite(fixedPool)
+        ? true
+        : Boolean(derivedPoolByPolicyYear.get(year)?.has(drg) && poolAmount > 0)
+
+      const poolEval = evaluateMoneyPool(row.totalClaim, poolAmount, enforceQuota)
+      return {
+        _id: { hospital: row._id.hospital, drg },
+        policyYear: year,
+        referenceYear: Number.isFinite(fixedPool) ? year : (prevYearByPolicyYear.get(year) ?? null),
+        poolSource: Number.isFinite(fixedPool) ? 'fixed-policy' : (enforceQuota ? 'prior-year-mean-amount' : 'observe-only'),
+        enforceQuota,
+        avgClaim: roundRM(row.avgClaim),
+        avgLOS: row.avgLOS,
+        count: row.claimCount,
+        poolAmount: roundRM(poolAmount),
+        claimRequestAmount: roundRM(row.totalClaim),
+        reimbursedAmount: roundRM(poolEval.reimbursedAmount),
+        penaltyAmount: roundRM(poolEval.penaltyAmount),
+        usagePct: poolEval.usagePct,
+        statusZone: poolEval.statusZone,
+        reimburseRate: poolEval.reimburseRate
+      }
+    })
 
     const currentYearRows = policyYear === null
       ? []
-      : annualHospitalDRG.filter((row) => row._id.year === policyYear)
+      : yearlyPoolDetails.filter((row) => row.policyYear === policyYear)
 
-    const hospitalDRGWithQuota = currentYearRows.map((row) => {
+    const drgTotals = new Map()
+    currentYearRows.forEach((row) => {
       const drg = row._id.drg
-      const enforceQuota = referenceYear !== null && quotaByDRG.has(drg)
-      return {
-        _id: { hospital: row._id.hospital, drg },
-        avgClaim: row.avgClaim,
-        totalClaim: row.totalClaim,
-        avgLOS: row.avgLOS,
-        count: row.claimCount,
-        quota: enforceQuota ? quotaByDRG.get(drg) : 0,
-        enforceQuota,
-        policyYear,
-        referenceYear
-      }
+      drgTotals.set(drg, (drgTotals.get(drg) || 0) + row.claimRequestAmount)
     })
+
+    const top15Drgs = [...drgTotals.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 15)
+      .map(([drg]) => drg)
+
+    const hospitalDRGWithQuota = currentYearRows.filter((row) => top15Drgs.includes(row._id.drg))
 
     // Aggregate current policy-year claims by hospital for O/E calc.
     const hospitalStats = await claims.aggregate([
@@ -222,13 +330,22 @@ router.get('/hospitals', async (req, res) => {
       data: {
         hospitals,
         hospitalDRG: hospitalDRGWithQuota,
+        yearlyPoolDetails,
         hospitalStats,
+        drgCatalog: top15Drgs,
         quotaPolicy: {
-          pool: 'single-drg-per-year',
-          metric: 'mean',
+          mode: 'money-pool-per-drg-per-hospital-year',
+          metric: 'amount',
           policyYear,
           referenceYear,
-          firstYearObserveOnly: true
+          firstYearObserveOnly: true,
+          zoneRules: {
+            normal: '0% - 100% pool at 100% reimbursement',
+            buffer: '100% - 120% pool at 100% reimbursement',
+            reduced: '120% - 150% pool at 80% reimbursement',
+            penalty: '>150% pool at 60% reimbursement'
+          },
+          fixedPoolByYear: FIXED_DRG_POOL_BY_YEAR
         },
         lastUpdated: new Date()
       }
