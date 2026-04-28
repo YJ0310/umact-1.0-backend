@@ -219,11 +219,17 @@ router.get('/hospitals', async (req, res) => {
       {
         $addFields: {
           parsedAdmissionDate: {
-            $convert: {
-              input: '$admission_date',
-              to: 'date',
-              onError: null,
-              onNull: null
+            $cond: {
+              if: { $eq: [{ $type: '$admission_date' }, 'date'] },
+              then: '$admission_date',
+              else: {
+                $convert: {
+                  input: '$admission_date',
+                  to: 'date',
+                  onError: new Date('2023-01-01'),
+                  onNull: new Date('2023-01-01')
+                }
+              }
             }
           }
         }
@@ -264,18 +270,18 @@ router.get('/hospitals', async (req, res) => {
 
     const years = [...new Set(annualHospitalDRG.map((row) => row._id.year))].sort((a, b) => a - b)
     const policyYear = years.at(-1) || null
-    const referenceYear = years.length > 1 ? years.at(-2) : null
+    const referenceYear = years.length > 1 ? years.at(-2) : policyYear
 
     const prevYearByPolicyYear = new Map()
-    for (let i = 1; i < years.length; i += 1) {
-      prevYearByPolicyYear.set(years[i], years[i - 1])
+    for (let i = 0; i < years.length; i += 1) {
+      prevYearByPolicyYear.set(years[i], i > 0 ? years[i - 1] : years[i])
     }
 
     // Derived pool amount: previous year's mean claim amount per DRG across hospitals.
     const derivedPoolByPolicyYear = new Map()
-    for (let i = 1; i < years.length; i += 1) {
+    for (let i = 0; i < years.length; i += 1) {
       const targetYear = years[i]
-      const priorYear = years[i - 1]
+      const priorYear = i > 0 ? years[i - 1] : targetYear
       const priorRows = annualHospitalDRG.filter((row) => row._id.year === priorYear)
       const amountByDrg = new Map()
 
@@ -344,11 +350,17 @@ router.get('/hospitals', async (req, res) => {
       {
         $addFields: {
           parsedAdmissionDate: {
-            $convert: {
-              input: '$admission_date',
-              to: 'date',
-              onError: null,
-              onNull: null
+            $cond: {
+              if: { $eq: [{ $type: '$admission_date' }, 'date'] },
+              then: '$admission_date',
+              else: {
+                $convert: {
+                  input: '$admission_date',
+                  to: 'date',
+                  onError: new Date('2023-01-01'),
+                  onNull: new Date('2023-01-01')
+                }
+              }
             }
           }
         }
