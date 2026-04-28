@@ -817,19 +817,25 @@ router.get('/presentation', async (req, res) => {
           _id: null,
           actual: { $sum: '$total_claim_amount' },
           copay: { $sum: '$patient_co_payment' },
-          insurer: { $sum: '$insurer_payment' }
+          insurer: { $sum: '$insurance_paid' }
         }
       }
     ]).toArray()
 
-    const totalActual = aggTotals[0]?.actual || 0
-    const totalCopay = aggTotals[0]?.copay || 0
-    const totalInsurer = aggTotals[0]?.insurer || 0
+    const stats = aggTotals[0] || { actual: 0, copay: 0, insurer: 0 }
+    const totalActual = stats.actual || 0
+    const totalCopay = stats.copay || 0
+    const totalInsurer = stats.insurer || 0
+
+    // Fallback: If insurance_paid sum is 0 but total_claim_amount > 0, 
+    // it's likely a field naming issue in the current DB snapshot.
+    // Calculate as diff if insurer field is missing.
+    const effectiveInsurer = totalInsurer > 0 ? totalInsurer : (totalActual - totalCopay)
 
     // Simulation of savings (using the 3.9% and 14.58% targets from notebook if real fmv fields are missing)
     // In a real prod app, we'd have 'predicted_fmv' fields in the DB.
     // For this PoC, we apply the notebook's validated coefficients to the live data.
-    const insurerSaving = totalInsurer * 0.039 
+    const insurerSaving = effectiveInsurer * 0.039 
     const customerSaving = totalCopay * 0.1458
     const totalSaving = insurerSaving + customerSaving
 
