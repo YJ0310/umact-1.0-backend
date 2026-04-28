@@ -16,9 +16,6 @@ function meanInt(values) {
 }
 
 const FIXED_DRG_POOL_BY_YEAR = {
-  2023: {
-    'Surgical | Orthopedic | Arthroscopy': 10_000_000
-  }
 }
 
 const FIXED_DRG_LIST = [
