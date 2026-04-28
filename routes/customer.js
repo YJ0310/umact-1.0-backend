@@ -12,6 +12,20 @@ const router = Router()
 const PLAN_BASE_PREMIUMS = { Basic: 2400, Silver: 4800, Gold: 7800, Platinum: 14400 }
 const PLAN_LIMITS = { Basic: 50000, Silver: 80000, Gold: 100000, Platinum: 150000 }
 
+function buildRequestDoc({ type, firebaseUid, customerName, payload, attachments = [] }) {
+  return {
+    type,
+    firebaseUid,
+    customerName,
+    payload,
+    attachments,
+    status: 'pending',
+    history: [{ action: 'created', at: new Date() }],
+    created_at: new Date(),
+    updated_at: new Date()
+  }
+}
+
 // ── File upload config (medical checkup & claim receipts) ──
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -327,6 +341,21 @@ router.post('/checkup', upload.array('files', 5), async (req, res) => {
     }
     const result = await db.collection('checkups').insertOne(checkupDoc)
 
+    // Create insurer request for verification tracking
+    const user = firebaseUid ? await db.collection('users').findOne({ firebase_uid: firebaseUid }) : null
+    const requestDoc = buildRequestDoc({
+      type: 'checkup_verify',
+      firebaseUid,
+      customerName: user?.name || user?.given_name || 'Unknown',
+      payload: {
+        checkupId: result.insertedId,
+        quoteId: checkupDoc.quoteId,
+        fileCount: files.length
+      },
+      attachments: checkupDoc.files
+    })
+    await db.collection('requests').insertOne(requestDoc)
+
     res.json({
       success: true,
       checkupId: result.insertedId,
@@ -345,7 +374,7 @@ router.post('/checkup', upload.array('files', 5), async (req, res) => {
 // ═════════════════════════════════════════════════════════════
 router.post('/claim', upload.array('receipts', 5), async (req, res) => {
   try {
-    const { firebaseUid, hospitalId, hospitalName, admissionType, admissionDate, claimAmount, description, planType } = req.body
+    const { firebaseUid, hospitalId, hospitalName, admissionType, admissionDate, claimAmount, description, planType, drg } = req.body
 
     const db = getDB()
 
@@ -371,29 +400,45 @@ router.post('/claim', upload.array('receipts', 5), async (req, res) => {
     const annualLimit = { Basic: 50000, Silver: 80000, Gold: 100000, Platinum: 150000 }[planType] || 100000
     const remaining = annualLimit - totalUsed
 
-    const claimDoc = {
+    const user = firebaseUid ? await db.collection('users').findOne({ firebase_uid: firebaseUid }) : null
+    const receipts = (req.files || []).map(f => ({
+      originalName: f.originalname,
+      mimeType: f.mimetype,
+      size: f.size,
+      storagePath: `claims/${Date.now()}_${f.originalname}`
+    }))
+
+    const claimRequest = buildRequestDoc({
+      type: 'claim',
       firebaseUid: firebaseUid || null,
-      hospitalId, hospitalName, hospitalTier,
-      admissionType, admissionDate,
-      claimAmount: amount, copayment, insurerPays,
-      description,
-      planType,
-      annualLimit, totalUsedBefore: totalUsed, remainingBefore: remaining,
-      receipts: (req.files || []).map(f => ({
-        originalName: f.originalname, mimeType: f.mimetype, size: f.size,
-        storagePath: `claims/${Date.now()}_${f.originalname}`
-      })),
-      status: 'pending', // pending → under_review → approved → rejected
-      refNumber: `CLM-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 99999)).padStart(5, '0')}`,
-      source: 'app',
-      submitted_at: new Date()
-    }
-    const result = await db.collection('claims_submitted').insertOne(claimDoc)
+      customerName: user?.name || user?.given_name || 'Unknown',
+      payload: {
+        hospitalId,
+        hospitalName,
+        hospitalTier,
+        drg: drg || null,
+        admissionType,
+        admissionDate,
+        claimAmount: amount,
+        copayment,
+        insurerPays,
+        description,
+        planType,
+        annualLimit,
+        totalUsedBefore: totalUsed,
+        remainingBefore: remaining
+      },
+      attachments: receipts
+    })
+
+    claimRequest.refNumber = `CLM-${new Date().getFullYear()}-${String(Math.floor(Math.random() * 99999)).padStart(5, '0')}`
+    claimRequest.submitted_at = new Date()
+    const result = await db.collection('requests').insertOne(claimRequest)
 
     res.json({
       success: true,
       claimId: result.insertedId,
-      refNumber: claimDoc.refNumber,
+      refNumber: claimRequest.refNumber,
       claimAmount: amount,
       copayment,
       insurerPays,
@@ -403,6 +448,187 @@ router.post('/claim', upload.array('receipts', 5), async (req, res) => {
     })
   } catch (err) {
     console.error('Claim submit error:', err)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// ═════════════════════════════════════════════════════════════
+// POST /api/customer/request/plan-change — Plan change request
+// ═════════════════════════════════════════════════════════════
+router.post('/request/plan-change', async (req, res) => {
+  try {
+    const { firebaseUid, currentPlan, requestedPlan, reason } = req.body
+    if (!firebaseUid || !requestedPlan) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' })
+    }
+
+    const db = getDB()
+    const user = await db.collection('users').findOne({ firebase_uid: firebaseUid })
+    const requestDoc = buildRequestDoc({
+      type: 'plan_change',
+      firebaseUid,
+      customerName: user?.name || user?.given_name || 'Unknown',
+      payload: {
+        currentPlan: currentPlan || user?.planType || null,
+        requestedPlan,
+        reason: reason || null
+      }
+    })
+
+    const result = await db.collection('requests').insertOne(requestDoc)
+    res.json({ success: true, requestId: result.insertedId })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// ═════════════════════════════════════════════════════════════
+// POST /api/customer/request/biodata-change — Biodata update request
+// ═════════════════════════════════════════════════════════════
+router.post('/request/biodata-change', async (req, res) => {
+  try {
+    const { firebaseUid, updates, reason } = req.body
+    if (!firebaseUid || !updates) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' })
+    }
+
+    const db = getDB()
+    const user = await db.collection('users').findOne({ firebase_uid: firebaseUid })
+    const requestDoc = buildRequestDoc({
+      type: 'biodata_change',
+      firebaseUid,
+      customerName: user?.name || user?.given_name || 'Unknown',
+      payload: {
+        updates,
+        reason: reason || null
+      }
+    })
+    const result = await db.collection('requests').insertOne(requestDoc)
+    res.json({ success: true, requestId: result.insertedId })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// ═════════════════════════════════════════════════════════════
+// POST /api/customer/request/cancel-policy — Cancel policy request
+// ═════════════════════════════════════════════════════════════
+router.post('/request/cancel-policy', async (req, res) => {
+  try {
+    const { firebaseUid, reason } = req.body
+    if (!firebaseUid) return res.status(400).json({ success: false, error: 'Missing UID' })
+
+    const db = getDB()
+    const user = await db.collection('users').findOne({ firebase_uid: firebaseUid })
+    const requestDoc = buildRequestDoc({
+      type: 'cancel_policy',
+      firebaseUid,
+      customerName: user?.name || user?.given_name || 'Unknown',
+      payload: { reason: reason || null, planType: user?.planType || null }
+    })
+    const result = await db.collection('requests').insertOne(requestDoc)
+    res.json({ success: true, requestId: result.insertedId })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// ═════════════════════════════════════════════════════════════
+// PATCH /api/customer/request/:id — Edit pending request
+// ═════════════════════════════════════════════════════════════
+router.patch('/request/:id', async (req, res) => {
+  try {
+    const { id } = req.params
+    const { firebaseUid, payload } = req.body
+    if (!firebaseUid) return res.status(400).json({ success: false, error: 'Missing UID' })
+
+    const db = getDB()
+    const request = await db.collection('requests').findOne({ _id: new ObjectId(id), firebaseUid })
+    if (!request) return res.status(404).json({ success: false, error: 'Request not found' })
+    if (request.status !== 'pending') {
+      return res.status(400).json({ success: false, error: 'Only pending requests can be edited' })
+    }
+
+    await db.collection('requests').updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: { payload: { ...request.payload, ...payload }, updated_at: new Date() },
+        $push: { history: { action: 'edited', at: new Date() } }
+      }
+    )
+    res.json({ success: true })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// ═════════════════════════════════════════════════════════════
+// POST /api/customer/request/:id/cancel — Cancel pending/reviewed request
+// ═════════════════════════════════════════════════════════════
+router.post('/request/:id/cancel', async (req, res) => {
+  try {
+    const { id } = req.params
+    const { firebaseUid } = req.body
+    if (!firebaseUid) return res.status(400).json({ success: false, error: 'Missing UID' })
+
+    const db = getDB()
+    const request = await db.collection('requests').findOne({ _id: new ObjectId(id), firebaseUid })
+    if (!request) return res.status(404).json({ success: false, error: 'Request not found' })
+    if (!['pending', 'reviewed'].includes(request.status)) {
+      return res.status(400).json({ success: false, error: 'Only pending or reviewed requests can be cancelled' })
+    }
+
+    await db.collection('requests').updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: { status: 'cancelled', updated_at: new Date() },
+        $push: { history: { action: 'cancelled', at: new Date() } }
+      }
+    )
+    res.json({ success: true })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// ═════════════════════════════════════════════════════════════
+// POST /api/customer/request/:id/attachments — Upload requested files
+// ═════════════════════════════════════════════════════════════
+router.post('/request/:id/attachments', upload.array('files', 5), async (req, res) => {
+  try {
+    const { id } = req.params
+    const { firebaseUid } = req.body
+    if (!firebaseUid) return res.status(400).json({ success: false, error: 'Missing UID' })
+
+    const files = req.files || []
+    if (!files.length) {
+      return res.status(400).json({ success: false, error: 'No files uploaded' })
+    }
+
+    const db = getDB()
+    const request = await db.collection('requests').findOne({ _id: new ObjectId(id), firebaseUid })
+    if (!request) return res.status(404).json({ success: false, error: 'Request not found' })
+    if (request.status !== 'reviewed') {
+      return res.status(400).json({ success: false, error: 'Only reviewed requests accept extra files' })
+    }
+
+    const attachments = files.map((f) => ({
+      originalName: f.originalname,
+      mimeType: f.mimetype,
+      size: f.size,
+      storagePath: `requests/${Date.now()}_${f.originalname}`
+    }))
+
+    await db.collection('requests').updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $push: { attachments: { $each: attachments }, history: { action: 'uploaded_additional', at: new Date() } },
+        $set: { status: 'pending', updated_at: new Date() }
+      }
+    )
+
+    res.json({ success: true, fileCount: attachments.length })
+  } catch (err) {
     res.status(500).json({ success: false, error: err.message })
   }
 })
@@ -436,20 +662,29 @@ router.post('/login', async (req, res) => {
       user.picture = picture
     }
 
-    // Get claims history
-    const claims = await db.collection('claims_submitted')
+    // Get requests (claims + other actions)
+    const requests = await db.collection('requests')
       .find({ firebaseUid: uid })
-      .sort({ submitted_at: -1 })
-      .limit(20)
+      .sort({ created_at: -1 })
+      .limit(50)
       .toArray()
 
-    // Calculate usage
+    const claims = requests.filter((r) => r.type === 'claim')
+
+    // Calculate usage from approved claim requests
     const yearStart = new Date(new Date().getFullYear(), 0, 1)
-    const approvedClaims = await db.collection('claims_submitted').aggregate([
-      { $match: { firebaseUid: uid, status: { $in: ['approved', 'pending'] }, submitted_at: { $gte: yearStart } } },
-      { $group: { _id: null, total: { $sum: '$claimAmount' } } }
-    ]).toArray()
-    const totalUsed = approvedClaims[0]?.total || 0
+    const approvedClaims = claims.filter((r) =>
+      r.status === 'approved' && (!r.submitted_at || new Date(r.submitted_at) >= yearStart)
+    )
+    const totalUsed = approvedClaims.reduce((acc, r) => {
+      const reviewed = r.review || {}
+      const amount = reviewed.actualAmountFinal
+        ?? reviewed.actualAmountCurrent
+        ?? r.payload?.insurerPays
+        ?? r.payload?.claimAmount
+        ?? 0
+      return acc + Number(amount || 0)
+    }, 0)
     const annualLimit = user.annualLimit || PLAN_LIMITS.Basic
 
     // Get checkup status
@@ -469,6 +704,7 @@ router.post('/login', async (req, res) => {
         onboardingStatus: user.onboarding?.source ? 'completed' : 'missing',
       },
       claims,
+      requests,
       checkup: latestCheckup ? {
         status: latestCheckup.status,
         validUntil: latestCheckup.validUntil,

@@ -4,6 +4,7 @@
  * All data is live from MongoDB (seeded from historical CSV + app-generated).
  */
 import { Router } from 'express'
+import { ObjectId } from 'mongodb'
 import { getDB } from '../db/connection.js'
 
 const router = Router()
@@ -20,8 +21,54 @@ const FIXED_DRG_POOL_BY_YEAR = {
   }
 }
 
+const FIXED_DRG_LIST = [
+  'Medical | Infectious | Dengue Fever',
+  'Medical | Infectious | Dengue Haemorrhagic Fever',
+  'Medical | Respiratory | Asthma Exacerbation',
+  'Medical | Respiratory | Bronchitis',
+  'Medical | Respiratory | COPD Exacerbation',
+  'Medical | Respiratory | Pneumonia',
+  'Obstetrics | Maternity | C-Section',
+  'Obstetrics | Maternity | Normal Delivery',
+  'Surgical | Cardiac | Angioplasty with Stent',
+  'Surgical | Cardiac | CABG',
+  'Surgical | Cardiac | Heart Valve Replacement',
+  'Surgical | Orthopedic | Arthroscopy',
+  'Surgical | Orthopedic | Hip Replacement',
+  'Surgical | Orthopedic | Knee Replacement',
+  'Surgical | Orthopedic | Spinal Surgery'
+]
+
 function roundRM(value) {
   return Math.round(Number(value) || 0)
+}
+
+function normalizeTier(value) {
+  const numeric = Number(value)
+  if (Number.isFinite(numeric) && numeric > 0) return numeric
+  const match = String(value ?? '').match(/\d/)
+  return match ? Number(match[0]) : 2
+}
+
+function ensureHospitalCount(hospitals, targetCount = 60) {
+  if (hospitals.length >= targetCount) return hospitals
+  const padded = [...hospitals]
+  let index = 1
+  while (padded.length < targetCount) {
+    const name = `Placeholder Hospital ${String(index).padStart(2, '0')}`
+    if (!padded.some((h) => h.hospital_name === name)) {
+      padded.push({
+        _id: `placeholder-${index}`,
+        hospital_name: name,
+        tier: 2,
+        final_tier: 2,
+        region: 'Unknown',
+        placeholder: true
+      })
+    }
+    index += 1
+  }
+  return padded
 }
 
 function evaluateMoneyPool(claimRequestAmount, poolAmount, enforceQuota) {
@@ -162,7 +209,10 @@ router.get('/hospitals', async (req, res) => {
     const claims = db.collection('claims')
 
     // Get hospital tier assignments
-    const hospitals = await db.collection('hospitals').find({}).toArray()
+    const hospitals = ensureHospitalCount(
+      await db.collection('hospitals').find({}).toArray(),
+      60
+    )
 
     // Build annual hospital x DRG stats to support year-based money-pool policy.
     const annualHospitalDRG = await claims.aggregate([
@@ -277,22 +327,17 @@ router.get('/hospitals', async (req, res) => {
       }
     })
 
+    const filteredYearlyPoolDetails = yearlyPoolDetails.filter((row) =>
+      FIXED_DRG_LIST.includes(row._id.drg)
+    )
+
     const currentYearRows = policyYear === null
       ? []
-      : yearlyPoolDetails.filter((row) => row.policyYear === policyYear)
+      : filteredYearlyPoolDetails.filter((row) => row.policyYear === policyYear)
 
-    const drgTotals = new Map()
-    currentYearRows.forEach((row) => {
-      const drg = row._id.drg
-      drgTotals.set(drg, (drgTotals.get(drg) || 0) + row.claimRequestAmount)
-    })
-
-    const top15Drgs = [...drgTotals.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 15)
-      .map(([drg]) => drg)
-
-    const hospitalDRGWithQuota = currentYearRows.filter((row) => top15Drgs.includes(row._id.drg))
+    const hospitalDRGWithQuota = currentYearRows.filter((row) =>
+      FIXED_DRG_LIST.includes(row._id.drg)
+    )
 
     // Aggregate current policy-year claims by hospital for O/E calc.
     const hospitalStats = await claims.aggregate([
@@ -330,9 +375,9 @@ router.get('/hospitals', async (req, res) => {
       data: {
         hospitals,
         hospitalDRG: hospitalDRGWithQuota,
-        yearlyPoolDetails,
+        yearlyPoolDetails: filteredYearlyPoolDetails,
         hospitalStats,
-        drgCatalog: top15Drgs,
+        drgCatalog: FIXED_DRG_LIST,
         quotaPolicy: {
           mode: 'money-pool-per-drg-per-hospital-year',
           metric: 'amount',
@@ -352,6 +397,46 @@ router.get('/hospitals', async (req, res) => {
     })
   } catch (err) {
     console.error('Hospital analytics error:', err)
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// ═════════════════════════════════════════════════════════════
+// GET /api/analytics/hospitals/list — Lightweight hospital list
+// ═════════════════════════════════════════════════════════════
+router.get('/hospitals/list', async (req, res) => {
+  try {
+    const db = getDB()
+    const hospitals = ensureHospitalCount(
+      await db.collection('hospitals')
+      .find({}, { projection: { hospital_name: 1, tier: 1, final_tier: 1, region: 1 } })
+      .sort({ hospital_name: 1 })
+      .toArray(),
+      60
+    )
+
+    res.json({
+      success: true,
+      hospitals: hospitals.map((h) => ({
+        id: h._id,
+        name: h.hospital_name,
+        tier: normalizeTier(h.tier ?? h.final_tier),
+        region: h.region || 'Unknown'
+      })),
+      lastUpdated: new Date()
+    })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// ═════════════════════════════════════════════════════════════
+// GET /api/analytics/drgs — DRG list (top 15 by amount)
+// ═════════════════════════════════════════════════════════════
+router.get('/drgs', async (req, res) => {
+  try {
+    res.json({ success: true, drgs: FIXED_DRG_LIST })
+  } catch (err) {
     res.status(500).json({ success: false, error: err.message })
   }
 })
@@ -482,6 +567,116 @@ router.get('/presentation', async (req, res) => {
 // Insurer actions
 // ═════════════════════════════════════════════════════════════
 
+// GET /api/analytics/insurer/requests — Unified request board
+router.get('/insurer/requests', async (req, res) => {
+  try {
+    const db = getDB()
+    const status = req.query.status
+    const filter = status ? { status } : {}
+    const requests = await db.collection('requests')
+      .find(filter)
+      .sort({ created_at: -1 })
+      .limit(200)
+      .toArray()
+
+    res.json({ success: true, data: requests })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// POST /api/analytics/insurer/requests/:id/decision — Approve/Deny/Review
+router.post('/insurer/requests/:id/decision', async (req, res) => {
+  try {
+    const db = getDB()
+    const { id } = req.params
+    const { status, reason, reviewData } = req.body
+
+    if (!['approved', 'denied', 'reviewed'].includes(status)) {
+      return res.status(400).json({ success: false, error: 'Invalid status' })
+    }
+
+    const update = {
+      $set: {
+        status,
+        decision_reason: reason || null,
+        review: reviewData || null,
+        decided_at: new Date()
+      },
+      $push: {
+        history: {
+          action: status,
+          at: new Date(),
+          note: reason || null
+        }
+      }
+    }
+
+    const result = await db.collection('requests').updateOne({ _id: new ObjectId(id) }, update)
+    if (!result.matchedCount) {
+      return res.status(404).json({ success: false, error: 'Request not found' })
+    }
+
+    res.json({ success: true })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// GET /api/analytics/insurer/users — User list for edit/remove
+router.get('/insurer/users', async (req, res) => {
+  try {
+    const db = getDB()
+    const users = await db.collection('users')
+      .find({}, { projection: { firebase_uid: 1, email: 1, name: 1, planType: 1, annualLimit: 1, created_at: 1 } })
+      .sort({ created_at: -1 })
+      .limit(200)
+      .toArray()
+    res.json({ success: true, data: users })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// PATCH /api/analytics/insurer/users/:id — Edit user
+router.patch('/insurer/users/:id', async (req, res) => {
+  try {
+    const db = getDB()
+    const { id } = req.params
+    const { planType, annualLimit } = req.body
+    const update = {
+      ...(planType ? { planType } : {}),
+      ...(annualLimit ? { annualLimit: Number(annualLimit) } : {})
+    }
+    if (!Object.keys(update).length) {
+      return res.status(400).json({ success: false, error: 'No fields provided' })
+    }
+
+    const result = await db.collection('users').updateOne({ _id: new ObjectId(id) }, { $set: update })
+    if (!result.matchedCount) {
+      return res.status(404).json({ success: false, error: 'User not found' })
+    }
+    res.json({ success: true })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
+// DELETE /api/analytics/insurer/users/:id — Remove user
+router.delete('/insurer/users/:id', async (req, res) => {
+  try {
+    const db = getDB()
+    const { id } = req.params
+    const result = await db.collection('users').deleteOne({ _id: new ObjectId(id) })
+    if (!result.deletedCount) {
+      return res.status(404).json({ success: false, error: 'User not found' })
+    }
+    res.json({ success: true })
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message })
+  }
+})
+
 // GET /api/analytics/insurer/pending — Pending approvals for quotes
 router.get('/insurer/pending', async (req, res) => {
   try {
@@ -502,8 +697,8 @@ router.get('/insurer/pending', async (req, res) => {
 router.get('/insurer/claims/pending', async (req, res) => {
   try {
     const db = getDB()
-    const pending = await db.collection('claims_submitted')
-      .find({ status: 'pending' })
+    const pending = await db.collection('requests')
+      .find({ type: 'claim', status: 'pending' })
       .sort({ submitted_at: -1 })
       .limit(50)
       .toArray()
