@@ -22,21 +22,11 @@ const FIXED_DRG_POOL_BY_YEAR = {
 }
 
 const FIXED_DRG_LIST = [
-  'Medical | Infectious | Dengue Fever',
-  'Medical | Infectious | Dengue Haemorrhagic Fever',
-  'Medical | Respiratory | Asthma Exacerbation',
-  'Medical | Respiratory | Bronchitis',
-  'Medical | Respiratory | COPD Exacerbation',
-  'Medical | Respiratory | Pneumonia',
-  'Obstetrics | Maternity | C-Section',
-  'Obstetrics | Maternity | Normal Delivery',
-  'Surgical | Cardiac | Angioplasty with Stent',
-  'Surgical | Cardiac | CABG',
-  'Surgical | Cardiac | Heart Valve Replacement',
-  'Surgical | Orthopedic | Arthroscopy',
-  'Surgical | Orthopedic | Hip Replacement',
-  'Surgical | Orthopedic | Knee Replacement',
-  'Surgical | Orthopedic | Spinal Surgery'
+  'Maternity',
+  'Cardiac',
+  'Orthopedic',
+  'Respiratory',
+  'Infectious'
 ]
 
 function roundRM(value) {
@@ -132,53 +122,63 @@ router.get('/insurer', async (req, res) => {
 
     // By hospital type
     const byHospType = await claims.aggregate([
-      { $group: {
-        _id: '$hospital_type',
-        avgClaim: { $avg: '$total_claim_amount' },
-        totalClaim: { $sum: '$total_claim_amount' },
-        count: { $sum: 1 }
-      }},
+      {
+        $group: {
+          _id: '$hospital_type',
+          avgClaim: { $avg: '$total_claim_amount' },
+          totalClaim: { $sum: '$total_claim_amount' },
+          count: { $sum: 1 }
+        }
+      },
       { $sort: { _id: 1 } }
     ]).toArray()
 
     // By sub-category
     const bySubCat = await claims.aggregate([
-      { $group: {
-        _id: '$sub_category',
-        avgClaim: { $avg: '$total_claim_amount' },
-        avgLOS: { $avg: '$length_of_stay' },
-        count: { $sum: 1 }
-      }},
+      {
+        $group: {
+          _id: '$sub_category',
+          avgClaim: { $avg: '$total_claim_amount' },
+          avgLOS: { $avg: '$length_of_stay' },
+          count: { $sum: 1 }
+        }
+      },
       { $sort: { avgClaim: -1 } }
     ]).toArray()
 
     // By region
     const byRegion = await claims.aggregate([
-      { $group: {
-        _id: '$region',
-        avgClaim: { $avg: '$total_claim_amount' },
-        count: { $sum: 1 }
-      }},
+      {
+        $group: {
+          _id: '$region',
+          avgClaim: { $avg: '$total_claim_amount' },
+          count: { $sum: 1 }
+        }
+      },
       { $sort: { avgClaim: -1 } }
     ]).toArray()
 
     // Co-payment stats
     const copayStats = await claims.aggregate([
-      { $group: {
-        _id: null,
-        avgCopay: { $avg: '$patient_co_payment' },
-        hitsCapPct: { $avg: { $cond: [{ $gte: ['$patient_co_payment', 3000] }, 1, 0] } },
-        totalCopay: { $sum: '$patient_co_payment' }
-      }}
+      {
+        $group: {
+          _id: null,
+          avgCopay: { $avg: '$patient_co_payment' },
+          hitsCapPct: { $avg: { $cond: [{ $gte: ['$patient_co_payment', 3000] }, 1, 0] } },
+          totalCopay: { $sum: '$patient_co_payment' }
+        }
+      }
     ]).toArray()
 
     // Smoker vs non-smoker
     const bySmoker = await claims.aggregate([
-      { $group: {
-        _id: '$smoker_status',
-        avgClaim: { $avg: '$total_claim_amount' },
-        count: { $sum: 1 }
-      }}
+      {
+        $group: {
+          _id: '$smoker_status',
+          avgClaim: { $avg: '$total_claim_amount' },
+          count: { $sum: 1 }
+        }
+      }
     ]).toArray()
 
     res.json({
@@ -345,6 +345,13 @@ router.get('/hospitals', async (req, res) => {
       FIXED_DRG_LIST.includes(row._id.drg)
     )
 
+    console.log("YearlyPoolDetails")
+    console.log(yearlyPoolDetails)
+    console.log("currentYearRows")
+    console.log(currentYearRows)
+    console.log("hospitalDRGWithQuota")
+    console.log(hospitalDRGWithQuota)
+
     // Aggregate current policy-year claims by hospital for O/E calc.
     const hospitalStats = await claims.aggregate([
       {
@@ -372,13 +379,15 @@ router.get('/hospitals', async (req, res) => {
         }
       },
       { $match: { admissionYear: policyYear } },
-      { $group: {
-        _id: '$hospital_name',
-        avgClaim: { $avg: '$total_claim_amount' },
-        totalClaim: { $sum: '$total_claim_amount' },
-        avgLOS: { $avg: '$length_of_stay' },
-        count: { $sum: 1 }
-      }},
+      {
+        $group: {
+          _id: '$hospital_name',
+          avgClaim: { $avg: '$total_claim_amount' },
+          totalClaim: { $sum: '$total_claim_amount' },
+          avgLOS: { $avg: '$length_of_stay' },
+          count: { $sum: 1 }
+        }
+      },
       { $sort: { avgClaim: -1 } }
     ]).toArray()
 
@@ -421,9 +430,9 @@ router.get('/hospitals/list', async (req, res) => {
     const db = getDB()
     const hospitals = ensureHospitalCount(
       await db.collection('hospitals')
-      .find({}, { projection: { hospital_name: 1, tier: 1, final_tier: 1, region: 1 } })
-      .sort({ hospital_name: 1 })
-      .toArray(),
+        .find({}, { projection: { hospital_name: 1, tier: 1, final_tier: 1, region: 1 } })
+        .sort({ hospital_name: 1 })
+        .toArray(),
       60
     )
 
@@ -465,14 +474,16 @@ router.get('/hospitals/:name', async (req, res) => {
 
     const drgBreakdown = await db.collection('claims').aggregate([
       { $match: { hospital_name: hospName } },
-      { $group: {
-        _id: '$sub_category',
-        avgClaim: { $avg: '$total_claim_amount' },
-        totalClaim: { $sum: '$total_claim_amount' },
-        avgLOS: { $avg: '$length_of_stay' },
-        count: { $sum: 1 },
-        avgCopay: { $avg: '$patient_co_payment' }
-      }},
+      {
+        $group: {
+          _id: '$sub_category',
+          avgClaim: { $avg: '$total_claim_amount' },
+          totalClaim: { $sum: '$total_claim_amount' },
+          avgLOS: { $avg: '$length_of_stay' },
+          count: { $sum: 1 },
+          avgCopay: { $avg: '$patient_co_payment' }
+        }
+      },
       { $sort: { avgClaim: -1 } }
     ]).toArray()
 
@@ -495,13 +506,15 @@ router.get('/drg/:name', async (req, res) => {
 
     const hospitalBreakdown = await db.collection('claims').aggregate([
       { $match: { sub_category: drgName } },
-      { $group: {
-        _id: '$hospital_name',
-        avgClaim: { $avg: '$total_claim_amount' },
-        totalClaim: { $sum: '$total_claim_amount' },
-        avgLOS: { $avg: '$length_of_stay' },
-        count: { $sum: 1 }
-      }},
+      {
+        $group: {
+          _id: '$hospital_name',
+          avgClaim: { $avg: '$total_claim_amount' },
+          totalClaim: { $sum: '$total_claim_amount' },
+          avgLOS: { $avg: '$length_of_stay' },
+          count: { $sum: 1 }
+        }
+      },
       { $sort: { avgClaim: -1 } }
     ]).toArray()
 
@@ -544,12 +557,14 @@ router.get('/presentation', async (req, res) => {
       if (modelCount > 0) {
         const overFMV = await db.collection('model_results').aggregate([
           { $match: { fmv_gap: { $gt: 0 } } },
-          { $group: {
-            _id: null,
-            count: { $sum: 1 },
-            totalGap: { $sum: '$fmv_gap' },
-            avgGap: { $avg: '$fmv_gap' }
-          }}
+          {
+            $group: {
+              _id: null,
+              count: { $sum: 1 },
+              totalGap: { $sum: '$fmv_gap' },
+              avgGap: { $avg: '$fmv_gap' }
+            }
+          }
         ]).toArray()
         modelSummary = overFMV[0] || null
       }
@@ -741,12 +756,14 @@ router.post('/insurer/approve/:quoteId', async (req, res) => {
       const limits = { Basic: 50000, Silver: 80000, Gold: 100000, Platinum: 150000 }
       await db.collection('users').updateOne(
         { firebase_uid: quote.firebaseUid },
-        { $set: {
-          planType: quote.planType,
-          annualLimit: limits[quote.planType] || 100000,
-          premiums: quote.premiums,
-          approved_at: new Date()
-        }},
+        {
+          $set: {
+            planType: quote.planType,
+            annualLimit: limits[quote.planType] || 100000,
+            premiums: quote.premiums,
+            approved_at: new Date()
+          }
+        },
         { upsert: true }
       )
     }
@@ -767,11 +784,13 @@ router.post('/insurer/renew/:uid', async (req, res) => {
     const limits = { Basic: 50000, Silver: 80000, Gold: 100000, Platinum: 150000 }
     await db.collection('users').updateOne(
       { firebase_uid: uid },
-      { $set: {
-        planType: newPlan || undefined,
-        renewed_at: new Date(),
-        renewalCount: { $inc: 1 }
-      }}
+      {
+        $set: {
+          planType: newPlan || undefined,
+          renewed_at: new Date(),
+          renewalCount: { $inc: 1 }
+        }
+      }
     )
 
     res.json({ success: true, message: 'Plan renewed successfully.' })
