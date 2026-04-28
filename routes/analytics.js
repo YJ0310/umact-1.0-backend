@@ -315,7 +315,10 @@ router.get('/hospitals', async (req, res) => {
       const drg = row._id.drg
       const fixedPool = FIXED_DRG_POOL_BY_YEAR?.[year]?.[drg]
       const derivedPool = derivedPoolByPolicyYear.get(year)?.get(drg) || 0
-      const poolAmount = Number.isFinite(fixedPool) ? fixedPool : derivedPool
+      const baseAmount = Number.isFinite(fixedPool) ? fixedPool : derivedPool
+      const riskAdjuster = 1.05
+      const regionalWeight = 1.02
+      const poolAmount = baseAmount * (year === 2023 ? 1 : (riskAdjuster * regionalWeight))
       const enforceQuota = Number.isFinite(fixedPool)
         ? true
         : Boolean(derivedPoolByPolicyYear.get(year)?.has(drg) && poolAmount > 0)
@@ -327,6 +330,9 @@ router.get('/hospitals', async (req, res) => {
         referenceYear: Number.isFinite(fixedPool) ? year : (prevYearByPolicyYear.get(year) ?? null),
         poolSource: Number.isFinite(fixedPool) ? 'fixed-policy' : (enforceQuota ? 'prior-year-mean-amount' : 'observe-only'),
         enforceQuota,
+        baseAmount: roundRM(baseAmount),
+        riskAdjuster: year === 2023 ? 1 : riskAdjuster,
+        regionalWeight: year === 2023 ? 1 : regionalWeight,
         avgClaim: roundRM(row.avgClaim),
         avgLOS: row.avgLOS,
         count: row.claimCount,
