@@ -21,7 +21,13 @@ const PORT = process.env.PORT || 3001
 
 // ── Middleware ──────────────────────────────────────────────
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:3000', 'http://localhost:4173'],
+  origin: [
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'http://localhost:4173',
+    'https://umact-1-0-frontend.vercel.app',
+    'https://umact-hackathon.vercel.app'
+  ],
   credentials: true
 }))
 app.use(express.json({ limit: '10mb' }))
@@ -51,6 +57,127 @@ app.use('/api/analytics', async (req, res, next) => {
 // ── API Routes ──────────────────────────────────────────────
 app.use('/api/customer', customerRoutes)
 app.use('/api/analytics', analyticsRoutes)
+
+// ── API Root Landing Page ──────────────────────────────────
+app.get('/', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>UMACT RiskByte API — Service Status</title>
+      <style>
+        :root {
+          --bg: #0f172a;
+          --card: #1e293b;
+          --accent: #38bdf8;
+          --success: #10b981;
+          --text: #f8fafc;
+          --text-dim: #94a3b8;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+          background: var(--bg);
+          color: var(--text);
+          font-family: 'Inter', -apple-system, sans-serif;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 100vh;
+          padding: 2rem;
+        }
+        .container {
+          max-width: 640px;
+          width: 100%;
+          text-align: center;
+        }
+        .card {
+          background: var(--card);
+          padding: 3rem;
+          border-radius: 1.5rem;
+          box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+          border: 1px solid rgba(255,255,255,0.1);
+          backdrop-filter: blur(10px);
+          position: relative;
+          overflow: hidden;
+          animation: slideUp 0.6s ease-out;
+        }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+        .card::before {
+          content: '';
+          position: absolute;
+          top: 0; left: 0; right: 0; height: 4px;
+          background: linear-gradient(90deg, var(--accent), var(--success));
+        }
+        h1 { font-size: 2.25rem; font-weight: 800; margin-bottom: 0.5rem; letter-spacing: -0.025em; }
+        .badge {
+          display: inline-flex;
+          align-items: center;
+          background: rgba(16, 185, 129, 0.1);
+          color: var(--success);
+          padding: 0.5rem 1rem;
+          border-radius: 9999px;
+          font-weight: 600;
+          font-size: 0.875rem;
+          margin-bottom: 2rem;
+        }
+        .dot { width: 8px; height: 8px; background: currentColor; border-radius: 50%; margin-right: 0.75rem; animation: pulse 2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        
+        p { color: var(--text-dim); margin-bottom: 2rem; line-height: 1.6; }
+        
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; text-align: left; }
+        .stat-card {
+          background: rgba(15, 23, 42, 0.5);
+          padding: 1.25rem;
+          border-radius: 1rem;
+          border: 1px solid rgba(255,255,255,0.05);
+        }
+        .label { font-size: 0.75rem; font-weight: 700; color: var(--text-dim); text-transform: uppercase; margin-bottom: 0.25rem; }
+        .val { font-size: 1.125rem; font-weight: 600; font-family: monospace; color: var(--accent); }
+        
+        .footer { margin-top: 3rem; font-size: 0.875rem; color: var(--text-dim); }
+        a { color: var(--accent); text-decoration: none; font-weight: 600; }
+        a:hover { text-decoration: underline; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="card">
+          <h1>RiskByte API</h1>
+          <div class="badge"><div class="dot"></div> System Operational</div>
+          
+          <p>The UMACT Hackathon 2026 Core Engine is running. This server handles actuarial modeling, claims processing, and hospital analytics.</p>
+          
+          <div class="grid">
+            <div class="stat-card">
+              <div class="label">Status</div>
+              <div class="val">200 OK</div>
+            </div>
+            <div class="stat-card">
+              <div class="label">Version</div>
+              <div class="val">v1.0.0</div>
+            </div>
+            <div class="stat-card">
+              <div class="label">Uptime</div>
+              <div class="val">Live</div>
+            </div>
+            <div class="stat-card">
+              <div class="label">Deployment</div>
+              <div class="val">Vercel</div>
+            </div>
+          </div>
+          
+          <div class="footer">
+            Powered by <a href="https://umact-1-0-frontend.vercel.app">UMACT Dashboard</a>
+          </div>
+        </div>
+      </div>
+    </body>
+    </html>
+  `)
+})
 
 // ── Health check ────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
