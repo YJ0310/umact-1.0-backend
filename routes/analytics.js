@@ -22,21 +22,21 @@ const FIXED_DRG_POOL_BY_YEAR = {
 }
 
 const FIXED_DRG_LIST = [
-  'Medical | Infectious | Dengue Fever',
-  'Medical | Infectious | Dengue Haemorrhagic Fever',
-  'Medical | Respiratory | Asthma Exacerbation',
-  'Medical | Respiratory | Bronchitis',
-  'Medical | Respiratory | COPD Exacerbation',
-  'Medical | Respiratory | Pneumonia',
-  'Obstetrics | Maternity | C-Section',
-  'Obstetrics | Maternity | Normal Delivery',
-  'Surgical | Cardiac | Angioplasty with Stent',
-  'Surgical | Cardiac | CABG',
-  'Surgical | Cardiac | Heart Valve Replacement',
-  'Surgical | Orthopedic | Arthroscopy',
-  'Surgical | Orthopedic | Hip Replacement',
+  'Surgical | Orthopedic | Spinal Surgery',
   'Surgical | Orthopedic | Knee Replacement',
-  'Surgical | Orthopedic | Spinal Surgery'
+  'Surgical | Orthopedic | Hip Replacement',
+  'Surgical | Orthopedic | Arthroscopy',
+  'Surgical | Cardiac | Heart Valve Replacement',
+  'Surgical | Cardiac | CABG',
+  'Surgical | Cardiac | Angioplasty with Stent',
+  'Obstetrics | Maternity | Normal Delivery',
+  'Obstetrics | Maternity | C-Section',
+  'Medical | Respiratory | Pneumonia',
+  'Medical | Respiratory | COPD Exacerbation',
+  'Medical | Respiratory | Bronchitis',
+  'Medical | Respiratory | Asthma Exacerbation',
+  'Medical | Infectious | Dengue Haemorrhagic Fever',
+  'Medical | Infectious | Dengue Fever'
 ]
 
 function roundRM(value) {
