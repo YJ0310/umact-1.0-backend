@@ -313,7 +313,7 @@ router.get('/hospitals', async (req, res) => {
     const yearlyPoolDetails = annualHospitalDRG.map((row) => {
       const year = row._id.year
       const drg = row._id.drg
-      // const fixedPool = FIXED_DRG_POOL_BY_YEAR?.[year]?.[drg]
+      const fixedPool = FIXED_DRG_POOL_BY_YEAR?.[year]?.[drg]
       const derivedPool = derivedPoolByPolicyYear.get(year)?.get(drg) || 0
       const baseAmount = Number.isFinite(fixedPool) ? fixedPool : derivedPool
       const riskAdjuster = 1.05
