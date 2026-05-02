@@ -319,9 +319,9 @@ router.get('/hospitals', async (req, res) => {
       const riskAdjuster = 1.05
       const regionalWeight = 1.02
       const poolAmount = baseAmount * (year === 2023 ? 1 : (riskAdjuster * regionalWeight))
-      const enforceQuota = Number.isFinite(fixedPool)
+      const enforceQuota = (year === 2023) ? false : (Number.isFinite(fixedPool)
         ? true
-        : Boolean(derivedPoolByPolicyYear.get(year)?.has(drg) && poolAmount > 0)
+        : Boolean(derivedPoolByPolicyYear.get(year)?.has(drg) && poolAmount > 0))
 
       const poolEval = evaluateMoneyPool(row.totalClaim, poolAmount, enforceQuota)
       return {
