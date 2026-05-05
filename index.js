@@ -1,6 +1,6 @@
 /**
  * ═══════════════════════════════════════════════════════════
- * UMACT Hackathon 2026 — ChinShi Backend API
+ * UMACT Hackathon 2026 — RiskByte Backend API
  * ═══════════════════════════════════════════════════════════
  * Express server with MongoDB Atlas, file upload (multer),
  * and API routes for customer, analytics, and insurer actions.
@@ -66,7 +66,7 @@ app.get('/', (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>UMACT ChinShi API — Service Status</title>
+      <title>UMACT RiskByte API — Service Status</title>
       <style>
         :root {
           --bg: #0f172a;
@@ -145,7 +145,7 @@ app.get('/', (req, res) => {
     <body>
       <div class="container">
         <div class="card">
-          <h1>ChinShi API</h1>
+          <h1>RiskByte API</h1>
           <div class="badge"><div class="dot"></div> System Operational</div>
           
           <p>The UMACT Hackathon 2026 Core Engine is running. This server handles actuarial modeling, claims processing, and hospital analytics.</p>
@@ -183,7 +183,7 @@ app.get('/', (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'umact-chinshi-api',
+    service: 'umact-riskbyte-api',
     version: '1.0.0',
     timestamp: new Date().toISOString()
   })
@@ -204,7 +204,7 @@ app.use((err, req, res, next) => {
 // ── Start server ────────────────────────────────────────────
 async function start() {
   console.log('═══════════════════════════════════════════')
-  console.log('  UMACT Hackathon 2026 — ChinShi API')
+  console.log('  UMACT Hackathon 2026 — RiskByte API')
   console.log('═══════════════════════════════════════════')
 
   // Connect to MongoDB (non-fatal on failure)
