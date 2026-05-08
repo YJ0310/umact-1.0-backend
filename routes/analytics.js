@@ -350,11 +350,7 @@ router.get('/hospitals', async (req, res) => {
       FIXED_DRG_LIST.includes(row._id.drg)
     )
 
-    const currentYearRows = policyYear === null
-      ? []
-      : filteredYearlyPoolDetails.filter((row) => row.policyYear === policyYear)
-
-    const hospitalDRGWithQuota = currentYearRows.filter((row) =>
+    const hospitalDRGWithQuota = filteredYearlyPoolDetails.filter((row) =>
       FIXED_DRG_LIST.includes(row._id.drg)
     )
 
